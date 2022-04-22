@@ -11,13 +11,15 @@ translating NewsQA. The steps:
 1. Download the NewsQA dataset. Follow the steps in the
    [NewsQA website](https://www.microsoft.com/en-us/research/project/newsqa-dataset/) to download the dataset.
 2. Translate every sentence and question. Follow the steps described in the next section.
-3. Use a translation aligner to find the correspondence between each answer from NewsQA and a span of text from the 
+3. Use a translation aligner to find the correspondence between each answer from NewsQA and a span of text from the
    translated sentence in Spanish. Follow the steps in the repo
    [pln-fing-udelar/Mask-Align](https://github.com/pln-fing-udelar/Mask-Align).
 
 ## Translating NewsQA into Spanish
 
-TODO
+We translated the dataset using the [Opus-MT](https://github.com/Helsinki-NLP/Opus-MT) model from Helsinki-NLP.
+1. Download the translate.py script to the same directory as cnn_stories folder is.
+2. Execute translate.py
 
 ## Contact Us
 
