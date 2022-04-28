@@ -1,57 +1,97 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
+from __future__ import annotations
 
-from transformers import MarianTokenizer, MarianMTModel
-from os import listdir
-from os.path import isfile, join
+import os
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from typing import Any
 
 import torch
-import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, IterableDataset
+from tqdm.auto import tqdm
+from transformers import AutoModelForSeq2SeqLM, AutoTokenizer, PreTrainedTokenizerBase
 
-def chunks(lst, n):
-    # Yield successive n-sized chunks from lst
-    for i in range(0, len(lst), n):
-        yield lst[i:i + n]
+DATA_PATH = "cnn_stories/cnn/stories"
+OUTPUT_PATH = "cnn_stories/cnn/translated"
 
-path_stories = "cnn_stories/cnn/stories/"
-path_translated = "cnn_stories/cnn/translated/"
-model_name = "Helsinki-NLP/opus-mt-en-es"
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-# Download the model and the tokenizer
-model = MarianMTModel.from_pretrained(model_name).to(device)
-tokenizer = MarianTokenizer.from_pretrained(model_name)
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-def translate_story(file_name):
-	try:
-		file_story = open(path_stories + file_name, 'r')
-		file_translated = open(path_translated + file_name, "w")
-		text = file_story.readlines()
-		lines = []
-		for line in text:
-			if line != '\n':
-				lines.append(line)
-		for ck in chunks(lines, 20):
-			# Tokenize the text
-			batch = tokenizer(ck, return_tensors="pt", padding=True).to(device)
-			batch["input_ids"] = batch["input_ids"][:, :512]
-			batch["attention_mask"] = batch["attention_mask"][:, :512]
-			# Translate
-			translation = model.generate(**batch)
-			out_text = tokenizer.batch_decode(translation, skip_special_tokens=True)
-			for out_line in out_text:
-				file_translated.write(out_line + '\n')
-		file_translated.close()
-		file_story.close()
-	except RuntimeError as e:
-		print("Unable to translate", file_name, e)
-		raise
+NUM_WORKERS = len(os.sched_getaffinity(0)) // max(torch.cuda.device_count(), 1)
+
+BATCH_SIZE = 128
+
+MODEL_NAME = "Helsinki-NLP/opus-mt-en-es"
+
+
+class CNNStoryDataset(IterableDataset):
+    def __init__(self, data_folder: str, tokenizer: PreTrainedTokenizerBase | None = None) -> None:
+        self.data_folder = data_folder
+        self.tokenizer = tokenizer
+
+    def __iter__(self) -> Iterator[Mapping[str, Any]]:
+        for filename in os.listdir(self.data_folder):
+            with open(os.path.join(self.data_folder, filename)) as file:
+                for line in file:
+                    if line := line.strip():
+                        yield {"line": line, "filename": filename}
+
+    def collate(self, instances: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+        keys = next(iter(instances), {})
+        batch = {k: [instance[k] for instance in instances] for k in keys}
+
+        if self.tokenizer:
+            for k in keys:
+                stack = batch[k]
+
+                if k == "line":
+                    tokenized = self.tokenizer(stack, truncation=True, padding=True, return_tensors="pt")
+                    batch[f"{k}_ids"] = tokenized["input_ids"]
+                    batch[f"{k}_mask"] = tokenized["attention_mask"]
+
+        return batch
+
+
+def _write_file_maybe(filename: str | None, lines: Iterable[str]) -> None:
+    if filename is not None:
+        with open(os.path.join(OUTPUT_PATH, filename), "w") as file:
+            file.write("\n".join(lines) + "\n")
+
+
+def main() -> None:
+    model = AutoModelForSeq2SeqLM.from_pretrained(MODEL_NAME).to(DEVICE)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+    model.eval()
+
+    dataset = CNNStoryDataset(DATA_PATH, tokenizer)
+    data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, pin_memory=True,
+                             collate_fn=dataset.collate)
+
+    file_count = len(next(os.walk(dataset.data_folder))[2])
+    with torch.inference_mode(), tqdm(total=file_count, desc="Translating", unit="file") as progress:
+        last_filename = None
+        translated_lines = None
+
+        for batch in data_loader:
+            batch = {k: v.to(DEVICE) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+
+            generated_token_ids = model.generate(batch["line_ids"], attention_mask=batch["line_mask"])
+            translated_text = tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)
+
+            for translated_line, filename in zip(translated_text, batch["filename"]):
+                if last_filename != filename:  # A new file starts.
+                    _write_file_maybe(last_filename, translated_lines)
+
+                    last_filename = filename
+                    translated_lines = []
+
+                    progress.update()
+
+                translated_lines.append(translated_line)
+
+        _write_file_maybe(last_filename, translated_lines)
+
+        progress.update()
+
 
 if __name__ == "__main__":
-	onlyfiles = [f for f in listdir(path_stories) if isfile(join(path_stories, f))]
-	if device == 'cuda':
-		# combining with multiprocessing works but gives OOM in my GPU
-		for f in onlyfiles:
-			translate_story(f)
-	else:
-		mp.set_start_method('spawn')
-		with mp.Pool(processes=max(1, mp.cpu_count()-1)) as pool:
-			pool.map(translate_story, onlyfiles)
+    main()
