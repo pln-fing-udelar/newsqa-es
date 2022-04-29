@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 from __future__ import annotations
 
+import itertools
 import os
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any
@@ -17,22 +18,23 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 NUM_WORKERS = len(os.sched_getaffinity(0)) // max(torch.cuda.device_count(), 1)
 
-BATCH_SIZE = 128
+BATCH_SIZE = 63
 
 MODEL_NAME = "Helsinki-NLP/opus-mt-en-es"
 
 
 class CNNStoryDataset(IterableDataset):
-    def __init__(self, data_folder: str, tokenizer: PreTrainedTokenizerBase | None = None) -> None:
-        self.data_folder = data_folder
+    def __init__(self, paths: Iterable[str], tokenizer: PreTrainedTokenizerBase | None = None) -> None:
+        self.paths = paths
         self.tokenizer = tokenizer
 
     def __iter__(self) -> Iterator[Mapping[str, Any]]:
-        for filename in os.listdir(self.data_folder):
-            with open(os.path.join(self.data_folder, filename)) as file:
+        paths, self.paths = itertools.tee(self.paths)
+        for path in paths:
+            with open(path, encoding="utf-8") as file:
                 for line in file:
                     if line := line.strip():
-                        yield {"line": line, "filename": filename}
+                        yield {"line": line, "path": path}
 
     def collate(self, instances: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         keys = next(iter(instances), {})
@@ -52,7 +54,7 @@ class CNNStoryDataset(IterableDataset):
 
 def _write_file_maybe(filename: str | None, lines: Iterable[str]) -> None:
     if filename is not None:
-        with open(os.path.join(OUTPUT_PATH, filename), "w") as file:
+        with open(os.path.join(OUTPUT_PATH, filename), "w", encoding="utf-8") as file:
             file.write("\n".join(lines) + "\n")
 
 
@@ -62,12 +64,18 @@ def main() -> None:
 
     model.eval()
 
-    dataset = CNNStoryDataset(DATA_PATH, tokenizer)
+    paths = (os.path.join(DATA_PATH, filename)
+             for filename in os.listdir(DATA_PATH)
+             if not os.path.exists(os.path.join(OUTPUT_PATH, filename)))  # We only compute the missing files.
+    dataset = CNNStoryDataset(paths=paths, tokenizer=tokenizer)
     data_loader = DataLoader(dataset, batch_size=BATCH_SIZE, num_workers=NUM_WORKERS, pin_memory=True,
                              collate_fn=dataset.collate)
 
-    file_count = len(next(os.walk(dataset.data_folder))[2])
-    with torch.inference_mode(), tqdm(total=file_count, desc="Translating", unit="file") as progress:
+    file_count = len(next(os.walk(DATA_PATH))[2])  # More efficient to count files than `listdir` as it doesn't sort.
+    done_file_count = len(next(os.walk(OUTPUT_PATH))[2])
+
+    with torch.inference_mode(), \
+            tqdm(initial=done_file_count, total=file_count, desc="Translating", unit="file") as progress:
         last_filename = None
         translated_lines = None
 
@@ -77,7 +85,9 @@ def main() -> None:
             generated_token_ids = model.generate(batch["line_ids"], attention_mask=batch["line_mask"])
             translated_text = tokenizer.batch_decode(generated_token_ids, skip_special_tokens=True)
 
-            for translated_line, filename in zip(translated_text, batch["filename"]):
+            for translated_line, path in zip(translated_text, batch["path"]):
+                filename = os.path.basename(path)
+
                 if last_filename != filename:  # A new file starts.
                     _write_file_maybe(last_filename, translated_lines)
 
