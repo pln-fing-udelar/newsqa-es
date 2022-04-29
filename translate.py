@@ -18,7 +18,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 NUM_WORKERS = len(os.sched_getaffinity(0)) // max(torch.cuda.device_count(), 1)
 
-BATCH_SIZE = 63
+BATCH_SIZE = 48
 
 MODEL_NAME = "Helsinki-NLP/opus-mt-en-es"
 
