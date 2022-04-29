@@ -29,12 +29,15 @@ class CNNStoryDataset(IterableDataset):
         self.tokenizer = tokenizer
 
     def __iter__(self) -> Iterator[Mapping[str, Any]]:
+        worker_info = torch.utils.data.get_worker_info()
         paths, self.paths = itertools.tee(self.paths)
-        for path in paths:
-            with open(path, encoding="utf-8") as file:
-                for line in file:
-                    if line := line.strip():
-                        yield {"line": line, "path": path}
+        for i, path in enumerate(paths):
+            # Using an iterable dataset with multiple workers requires to manually select which instances are returned.
+            if worker_info is None or worker_info.id == i % worker_info.num_workers:
+                with open(path, encoding="utf-8") as file:
+                    for line in file:
+                        if line := line.strip():
+                            yield {"line": line, "path": path}
 
     def collate(self, instances: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
         keys = next(iter(instances), {})
